@@ -1,0 +1,8 @@
+# deploy/workerd/Dockerfile installs and builds inside the image.
+.git
+node_modules
+**/node_modules
+bazel-*
+.wrangler
+**/.wrangler
+.bazelrc.user
