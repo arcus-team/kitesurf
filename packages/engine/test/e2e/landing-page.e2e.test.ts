@@ -31,7 +31,8 @@ test("/ without inspector params, or with a non-http(s) url, serves the landing 
     expect(res.headers.get("content-type"), path).toBe("text/html; charset=utf-8");
     const csp = res.headers.get("content-security-policy");
     expect(csp, path).toContain("default-src 'none'");
-    expect(csp, path).toContain("form-action 'self'");
+    // The form redirects to the frontend on example.com, so form-action must allow its origin.
+    expect(csp, path).toContain("form-action 'self' https://example.com;");
     const html = await res.text();
     expect(html, path).toContain('<form class="omnibox" action="/" method="get"');
     expect(html, path).toContain(exampleHref("https://example.com/devtools", "wss", "ks.invalid"));
@@ -62,6 +63,8 @@ test("with a same-origin frontend, / serves the landing page with same-origin ex
     redirect: "manual",
   });
   expect(res.status).toBe(200);
+  // A path-only frontend is same-origin, so 'self' alone covers the form's redirect.
+  expect(res.headers.get("content-security-policy")).toContain("form-action 'self';");
   const html = await res.text();
   expect(html).toContain('<form class="omnibox" action="/" method="get"');
   expect(html).toContain(
