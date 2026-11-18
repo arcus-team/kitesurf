@@ -133,12 +133,20 @@ ${chromeInspectSection(url)}
 </body>
 </html>
 `;
+  // The form submits to "/" (same origin), which redirects to the DevTools frontend.
+  // Chrome applies form-action to that redirect as well, so a frontend on another
+  // origin (the hosted chrome-devtools-frontend.appspot.com) must be allowed explicitly.
+  // A path-only base (/inspector/inspector.html) is same-origin and covered by 'self'.
+  const formAction =
+    inspectorBase !== null && /^https?:\/\//i.test(inspectorBase)
+      ? `'self' ${new URL(inspectorBase).origin}`
+      : "'self'";
   return new Response(body, {
     headers: {
       "content-type": "text/html; charset=utf-8",
       "content-security-policy":
-        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; " +
-        "frame-ancestors 'none'",
+        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; " +
+        `form-action ${formAction}; frame-ancestors 'none'`,
       "x-content-type-options": "nosniff",
     },
   });

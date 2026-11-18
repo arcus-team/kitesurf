@@ -79,3 +79,5 @@ packages/engine/test/e2e/.fixtures-dist/
 
 # Triage skill scratch space (.agents/skills/triage).
 /triage/
+
+/tmp
