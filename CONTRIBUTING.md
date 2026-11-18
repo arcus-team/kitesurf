@@ -123,11 +123,12 @@ pnpm run test:e2e <file-substring>
 Pass a file-name substring to `test:e2e` to run only the files you touched. For
 Rust changes, also run `pnpm run test:rust` and `pnpm run lint:rust` (the Rust
 gates as Bazel tests). CI runs
-the build, the checks, the Rust host tests, the vitest suite and the Playwright
-lane. It does not run the e2e or WPT lanes, so run the ones your change touches.
-CI builds on bazelflare, except for a pull request from a fork: GitHub gives its
-jobs no token to authenticate with, so they build on the runner, which takes
-longer, and skip the Playwright lane, which main runs once the change merges.
+the build, the checks, the Rust host tests, the vitest suite, the Playwright
+lane and the WPT expectations gate (`scripts/wpt-ci.sh`). It does not run the
+e2e lane, so run the files your change touches. CI builds on bazelflare, except
+for a pull request from a fork: GitHub gives its jobs no token to authenticate
+with, so they build on the runner, which takes longer, and skip the Playwright
+lane and the WPT gate, which main runs once the change merges.
 
 ## Commits
 

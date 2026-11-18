@@ -332,6 +332,7 @@ function stubOutbound(
   bodies: Record<string, string> = {},
   delays: Record<string, number> = {},
   redirects: Record<string, string> = {},
+  contentTypes: Record<string, string> = {},
 ): SandboxOutboundOverride {
   const fetcher = {
     fetch: async (input: RequestInfo | URL) => {
@@ -340,7 +341,9 @@ function stubOutbound(
       const location = redirects[url];
       return new Response(location ? null : (bodies[url] ?? "export default 1;"), {
         status: location ? 302 : 200,
-        headers: location ? { location } : { "content-type": "text/javascript" },
+        headers: location
+          ? { location }
+          : { "content-type": contentTypes[url] ?? "text/javascript" },
       });
     },
   } as Fetcher;
@@ -483,22 +486,113 @@ describe("page specifiers that name the loaded worker's own modules", () => {
 });
 
 describe("walkModuleGraph asset-import stubs", () => {
+  const PAGE = "https://example.com/page.html";
+  const STUB = "/* kitesurf: asset-import side-effect stub */\nexport {};\n";
+  const walk = (descriptors: ParentScriptDescriptor[], outbound = stubOutbound()) =>
+    walkModuleGraph({
+      descriptors,
+      pageUrl: PAGE,
+      connectionId: "conn",
+      sandboxOutbound: outbound,
+    });
+
   it("keeps the imported url out of the stub body", async () => {
     const url = "https://example.com/a.css?*/globalThis.ran=1;/*";
-    const { additionalModules } = await walkModuleGraph({
-      descriptors: [moduleInline(`import ${JSON.stringify(url)};`)],
-      pageUrl: "https://example.com/page.html",
-      connectionId: "conn",
-      sandboxOutbound: stubOutbound(),
-    });
+    const { additionalModules } = await walk(
+      [moduleInline(`import ${JSON.stringify(url)};`)],
+      stubOutbound({}, {}, {}, { [url]: "text/css" }),
+    );
     const stub = String(
       Object.values(additionalModules).find(
         (body) => typeof body === "string" && body.includes("asset-import"),
       ),
     );
     // A registry-renamed module also gets a synthetic import.meta that holds the url as a string.
-    expect(stub.endsWith("/* kitesurf: asset-import side-effect stub */\nexport {};\n")).toBe(true);
+    expect(stub.endsWith(STUB)).toBe(true);
     expect(stub.split(JSON.stringify(url)).join("")).not.toContain("globalThis.ran");
+  });
+
+  it("bakes an asset-extension url served as JavaScript", async () => {
+    // Vite answers `?import` with a JS module, so the default export must survive the walk.
+    const url = "https://example.com/icons.svg?import";
+    const { additionalModules } = await walk(
+      [moduleInline(`import iconUrl from "/icons.svg?import";`)],
+      stubOutbound({ [url]: `export default "/icons.svg";` }),
+    );
+    const bodies = Object.values(additionalModules).map(String);
+    expect(bodies.some((body) => body.includes(`export default "/icons.svg";`))).toBe(true);
+    expect(bodies.some((body) => body.includes("asset-import"))).toBe(false);
+  });
+
+  it("stubs an asset-extension url served as an image", async () => {
+    const url = "https://example.com/logo.svg";
+    const { additionalModules } = await walk(
+      [moduleInline(`import "/logo.svg";`)],
+      stubOutbound({ [url]: "<svg/>" }, {}, {}, { [url]: "image/svg+xml" }),
+    );
+    const bodies = Object.values(additionalModules).map(String);
+    expect(bodies.some((body) => body.endsWith(STUB))).toBe(true);
+  });
+
+  it("stubs an asset-extension url served as JavaScript with a non-JS body", async () => {
+    // A real SVG document is not lexable JavaScript, so the walker keeps the stub for it.
+    const url = "https://example.com/logo.svg";
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>';
+    const { descriptors, additionalModules } = await walk(
+      [moduleInline(`import "/logo.svg"; globalThis.ran = 1;`)],
+      stubOutbound({ [url]: svg }),
+    );
+    const bodies = Object.values(additionalModules).map(String);
+    expect(bodies.some((body) => body.endsWith(STUB))).toBe(true);
+    expect(descriptors[0]?.prefetchError).toBeUndefined();
+  });
+
+  it("keeps the stub intact for an asset-extension url whose JavaScript fails to resolve", async () => {
+    const url = "https://example.com/theme.css";
+    const { descriptors, additionalModules } = await walk(
+      [moduleInline(`import "/theme.css";`)],
+      stubOutbound({ [url]: `import "/dep.js?v=1"; import "node:fs";` }),
+    );
+    const stub = Object.values(additionalModules)
+      .map(String)
+      .find((body) => body.includes("asset-import"));
+    expect(stub?.endsWith(STUB)).toBe(true);
+    expect(stub).not.toContain("dep");
+    expect(descriptors[0]?.prefetchError).toBeUndefined();
+  });
+
+  it("fetches a failing asset-extension url once", async () => {
+    const url = "https://example.com/a.css";
+    const fetches: string[] = [];
+    const fetcher = {
+      fetch: async (input: RequestInfo | URL) => {
+        const href =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        fetches.push(href);
+        const unavailable = href === url;
+        return new Response(unavailable ? "unavailable" : "export default 1;", {
+          status: unavailable ? 503 : 200,
+          headers: { "content-type": "text/javascript" },
+        });
+      },
+    } as Fetcher;
+    const outbound: SandboxOutboundOverride = {
+      external: false,
+      parent: () => fetcher,
+      loaded: () => fetcher,
+      session: () => (request) => fetcher.fetch(request.url),
+      final: async () => new Response(null, { status: 404 }),
+    };
+
+    const { descriptors, additionalModules } = await walk(
+      [moduleInline(`import "/a.css";`)],
+      outbound,
+    );
+
+    expect(fetches.filter((href) => href === url)).toHaveLength(1);
+    const bodies = Object.values(additionalModules).map(String);
+    expect(bodies.some((body) => body.endsWith(STUB))).toBe(true);
+    expect(descriptors[0]?.prefetchError).toBeUndefined();
   });
 });
 

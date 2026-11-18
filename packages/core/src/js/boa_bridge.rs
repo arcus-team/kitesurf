@@ -403,6 +403,14 @@ fn fr_register(wrapper: &JsValue, boa_pin: u64, wrapper_slot: Option<u64>) {
     });
 }
 
+// Release a boa_v8_store slot when its V8 value dies, for a value with no boa pin of its own.
+fn fr_register_slot(value: &JsValue, slot: u64) {
+    let _ = with_weak_rt(|rt| {
+        let held = Array::of2(&JsValue::from_f64(-1.0), &JsValue::from_f64(slot as f64));
+        let _ = rt.register.call2(&rt.registry, value, &held);
+    });
+}
+
 // Runs as its own V8 job, never inside a synchronous bridge call, so
 // the slab borrows here can't collide with an in-flight crossing.
 fn finalize_held(held: JsValue) {
@@ -1506,6 +1514,11 @@ fn boa_v8_lookup(o: &JsObject, ctx: &mut Context) -> Option<JsValue> {
 fn boa_v8_store(o: &JsObject, v: &JsValue, _ctx: &mut Context) -> u64 {
     let stored = make_weak(v).unwrap_or_else(|| v.clone());
     let idx = boa_v8_push(stored);
+    boa_v8_stamp(o, idx);
+    idx
+}
+
+fn boa_v8_stamp(o: &JsObject, idx: u64) {
     let desc = PropertyDescriptor::builder()
         .value(idx as f64)
         .writable(false)
@@ -1513,7 +1526,6 @@ fn boa_v8_store(o: &JsObject, v: &JsValue, _ctx: &mut Context) -> u64 {
         .configurable(true)
         .build();
     o.insert_property(stamp_pk(), desc);
-    idx
 }
 
 fn v8_boa_cache_get(v: &JsValue) -> Option<u64> {
@@ -1750,6 +1762,61 @@ fn noop(_: &BoaValue, _: &[BoaValue], _: &mut Context) -> JsResult<BoaValue> {
     Ok(BoaValue::undefined())
 }
 
+/// Strings with at least this many UTF-16 code units cross in chunks.
+const CHUNKED_STRING_UNITS: u32 = 1 << 16;
+const STRING_CHUNK_UNITS: u32 = 1 << 15;
+
+// Whole, `as_string` stages UTF-8 at up to 3 bytes a unit and `JsString::from` re-encodes it
+// through a growing Vec<u16>: several times the string in wasm memory, which never shrinks.
+// Chunks fill a boa string allocated at its final size; each still decodes like `as_string`.
+fn large_v8_string_to_boa(s: &js_sys::JsString) -> Option<JsString> {
+    let len = s.length();
+    if len < CHUNKED_STRING_UNITS {
+        return None;
+    }
+    // One search decides the builder: with no code unit above U+00FF the string is Latin-1.
+    if s.search(&js_sys::RegExp::new("[^\\x00-\\xff]", "")) >= 0 {
+        wide_v8_string_to_boa(s, len)
+    } else {
+        latin1_v8_string_to_boa(s, len)
+    }
+}
+
+fn wide_v8_string_to_boa(s: &js_sys::JsString, len: u32) -> Option<JsString> {
+    let mut out = boa_engine::string::Utf16JsStringBuilder::with_capacity(len as usize);
+    let mut pos = 0;
+    while pos < len {
+        let end = chunk_end(s, pos, len);
+        out.extend(s.substring(pos, end).as_string()?.encode_utf16());
+        pos = end;
+    }
+    Some(out.build())
+}
+
+fn latin1_v8_string_to_boa(s: &js_sys::JsString, len: u32) -> Option<JsString> {
+    let mut out = boa_engine::string::Latin1JsStringBuilder::with_capacity(len as usize);
+    let mut pos = 0;
+    while pos < len {
+        let end = chunk_end(s, pos, len);
+        // Every char is at most U+00FF: the search found no wider code unit.
+        out.extend(s.substring(pos, end).as_string()?.chars().map(|c| c as u8));
+        pos = end;
+    }
+    // SAFETY: every byte is the Latin1 code of a char at most U+00FF.
+    Some(unsafe { out.build_as_latin1() })
+}
+
+/// End of the chunk starting at `pos`, kept off the middle of a surrogate pair.
+fn chunk_end(s: &js_sys::JsString, pos: u32, len: u32) -> u32 {
+    let end = len.min(pos + STRING_CHUNK_UNITS);
+    let last = s.char_code_at(end - 1) as u32;
+    if end < len && (0xD800..=0xDBFF).contains(&last) {
+        end - 1
+    } else {
+        end
+    }
+}
+
 pub(crate) fn v8_to_boa(v: wasm_bindgen::JsValue, ctx: &mut Context) -> BoaValue {
     drain_v8_releases();
     if v.is_null() {
@@ -1763,6 +1830,11 @@ pub(crate) fn v8_to_boa(v: wasm_bindgen::JsValue, ctx: &mut Context) -> BoaValue
     }
     if let Some(b) = v.as_bool() {
         return BoaValue::from(b);
+    }
+    if v.is_string() {
+        if let Some(s) = large_v8_string_to_boa(v.unchecked_ref()) {
+            return BoaValue::from(s);
+        }
     }
     if let Some(s) = v.as_string() {
         return BoaValue::from(JsString::from(s.as_str()));
@@ -1836,8 +1908,40 @@ fn v8_object_to_boa(v: JsValue, ctx: &mut Context) -> BoaValue {
 // Wrap a V8 Promise as a boa promise. Enqueues a NativeAsyncJob that awaits
 // the V8 promise via JsFuture (polled by WasmJobQueue on V8's loop);
 // on settle it resolves/rejects the boa promise with the marshalled value.
+thread_local! {
+    // Native promise -> its identity-table slot, so a promise read from Boa again and again
+    // (`await document.fonts.ready` in a loop) shares one slot instead of adding one per read.
+    static NATIVE_PROMISE_SLOTS: RefCell<Option<js_sys::WeakMap>> = const { RefCell::new(None) };
+}
+
+fn stamp_native_promise(object: &JsObject, native: &JsValue, ctx: &mut Context) {
+    let slots = NATIVE_PROMISE_SLOTS.with(|c| {
+        c.borrow_mut()
+            .get_or_insert_with(js_sys::WeakMap::new)
+            .clone()
+    });
+    let key = native.unchecked_ref::<Object>();
+    // The slot is released only when the native dies, which also drops its entry here, so a
+    // hit is live; the identity check guards against a slot reused after an early release.
+    if let Some(slot) = slots.get(key).as_f64().map(|n| n as u64) {
+        if boa_v8_get(slot).is_some_and(|v| Object::is(&v, native)) {
+            boa_v8_stamp(object, slot);
+            return;
+        }
+    }
+    let slot = boa_v8_store(object, native, ctx);
+    fr_register_slot(native, slot);
+    slots.set(key, &JsValue::from_f64(slot as f64));
+}
+
 fn bridge_v8_promise(p: Promise, ctx: &mut Context) -> BoaValue {
     let (promise, ResolvingFunctions { resolve, reject }) = JsPromise::new_pending(ctx);
+    // Passing the boa promise back to V8 must return the original, which may carry properties
+    // its creator attached (a module loader's dependency data). The identity table holds it
+    // weakly, as it holds every boa object's V8 counterpart.
+    let native: JsValue = p.clone().into();
+    let object: JsObject = promise.clone().into();
+    stamp_native_promise(&object, &native, ctx);
     // The await is the async job; settling is a promise job, so the boa reaction
     // runs in a drain batch under the context lock like every other reaction.
     let job = NativeAsyncJob::new(async move |ctx: &std::cell::RefCell<&mut Context>| {
@@ -1951,8 +2055,9 @@ fn trap_get(_this: &BoaValue, args: &[BoaValue], ctx: &mut Context) -> JsResult<
     };
     if let Some(sym) = args.get(1).and_then(|k| k.as_symbol()) {
         let v8sym = boa_symbol_to_v8(&sym, ctx);
+        let recv = inheriting_receiver_v8(args.get(2), handle, ctx);
         let v8 = get_v8(handle);
-        return match with_v8(ctx, || Reflect::get(&v8, v8sym.as_ref())) {
+        return match with_v8(ctx, || reflect_get(&v8, v8sym.as_ref(), recv.as_ref())) {
             Ok(res) => Ok(v8_property_to_boa(res, None, (handle, &target), ctx)),
             Err(e) => getter_threw(e, ctx),
         };
@@ -1968,8 +2073,9 @@ fn trap_get(_this: &BoaValue, args: &[BoaValue], ctx: &mut Context) -> JsResult<
     if let Some(fast) = crate::js::dom_fastpath::try_fast_get(handle, &key, &target, ctx) {
         return Ok(fast);
     }
+    let recv = inheriting_receiver_v8(args.get(2), handle, ctx);
     let v8 = get_v8(handle);
-    match with_v8(ctx, || Reflect::get(&v8, &v8_key(&key))) {
+    match with_v8(ctx, || reflect_get(&v8, &v8_key(&key), recv.as_ref())) {
         Ok(res) => Ok(v8_property_to_boa(
             res,
             Some(key.as_str()),
@@ -1977,6 +2083,45 @@ fn trap_get(_this: &BoaValue, args: &[BoaValue], ctx: &mut Context) -> JsResult<
             ctx,
         )),
         Err(e) => getter_threw(e, ctx),
+    }
+}
+
+// A V8 getter found through a boa object's prototype chain runs with that object as `this`,
+// as OrdinaryGet passes the receiver; a direct read keeps the two-argument form.
+fn inheriting_receiver_v8(
+    recv: Option<&BoaValue>,
+    handle: u64,
+    ctx: &mut Context,
+) -> Option<JsValue> {
+    let recv = recv?.as_object()?;
+    inheriting_receiver(&recv, handle, ctx)
+}
+
+// The V8 receiver for a V8 property of `handle` that `recv` inherits. A boa object inherits it
+// through its boa chain. A bridged V8 object (an instance V8 built for a boa subclass) inherits
+// it through its V8 chain, which a boa `super` lookup skips by starting at the home object.
+fn inheriting_receiver(recv: &JsObject, handle: u64, ctx: &mut Context) -> Option<JsValue> {
+    if receives_through(recv, handle, ctx) {
+        return Some(boa_to_v8(&recv.clone().into(), ctx));
+    }
+    let own = bridged_v8_handle(recv, ctx).filter(|&own| own != handle)?;
+    let holder = get_v8(handle);
+    if !holder.is_object() && !holder.is_function() {
+        return None;
+    }
+    let holder: Object = holder.unchecked_into();
+    let recv = get_v8(own);
+    with_v8(ctx, || holder.is_prototype_of(&recv)).then_some(recv)
+}
+
+fn reflect_get(
+    target: &JsValue,
+    key: &JsValue,
+    recv: Option<&JsValue>,
+) -> Result<JsValue, JsValue> {
+    match recv {
+        Some(recv) => reflect_get_with_receiver(target, key, recv),
+        None => Reflect::get(target, key),
     }
 }
 
@@ -2062,7 +2207,13 @@ fn trap_apply(_this: &BoaValue, args: &[BoaValue], ctx: &mut Context) -> JsResul
         return Ok(BoaValue::undefined());
     };
     let this_v8 = match read_handle(&target, "__ks_t", ctx) {
-        Some(h) => get_v8(h),
+        // Methods stay bound to the object they were read from, keeping their identity; a boa
+        // object that inherited one through it is still the receiver when it is `this`.
+        Some(h) => args
+            .get(1)
+            .and_then(|t| t.as_object())
+            .and_then(|t| inheriting_receiver(&t, h, ctx))
+            .unwrap_or_else(|| get_v8(h)),
         None => match args.get(1) {
             Some(t)
                 if t.as_object()
@@ -2142,11 +2293,7 @@ fn trap_set(_this: &BoaValue, args: &[BoaValue], ctx: &mut Context) -> JsResult<
     // OrdinarySet writes inherited data to the receiver. Preserve V8 super-setters,
     // the global-proxy exception, and foreign Proxy forwarding.
     if let Some(recv) = args.get(3).and_then(|v| v.as_object()) {
-        let is_global = JsObject::equals(&recv, &ctx.global_object());
-        if !is_global
-            && bridged_v8_handle(&recv, ctx) != Some(handle)
-            && inherits_from_bridged(&recv, handle, ctx)
-        {
+        if receives_through(&recv, handle, ctx) {
             return set_on_receiver(handle, args.get(1), value, recv, ctx);
         }
     }
@@ -2160,6 +2307,14 @@ fn trap_set(_this: &BoaValue, args: &[BoaValue], ctx: &mut Context) -> JsResult<
         Ok(ok) => Ok(BoaValue::from(ok)),
         Err(e) => Err(JsError::from_opaque(v8_to_boa(e, ctx))),
     }
+}
+
+// Whether OrdinaryGet/OrdinarySet reached `handle` through `recv`'s own boa prototype chain. A
+// Proxy receiver forwards as before, and boa's global stays out: V8 natives need V8's global.
+fn receives_through(recv: &JsObject, handle: u64, ctx: &mut Context) -> bool {
+    !recv.is::<boa_engine::builtins::proxy::Proxy>()
+        && !JsObject::equals(recv, &ctx.global_object())
+        && inherits_from_bridged(recv, handle, ctx)
 }
 
 fn inherits_from_bridged(recv: &JsObject, handle: u64, ctx: &mut Context) -> bool {
@@ -2678,15 +2833,14 @@ fn tramp_method_body(
     fn_handle: f64,
     recv_handle: f64,
     args_v8: JsValue,
+    this_v8: JsValue,
 ) -> Result<JsValue, JsValue> {
     with_context(|ctx| {
         heal_at_entry(ctx);
         let Some(jsfn) = get_boa(fn_handle as u64).and_then(JsFunction::from_object) else {
             return Ok(JsValue::UNDEFINED);
         };
-        let this = get_boa(recv_handle as u64)
-            .map(|o| o.into())
-            .unwrap_or(BoaValue::undefined());
+        let this = method_receiver(this_v8, recv_handle as u64, ctx);
         let args = unpack_args(&args_v8, ctx);
         match jsfn.call(&this, &args, ctx) {
             Ok(res) => Ok(boa_to_v8(&res, ctx)),
@@ -2702,6 +2856,22 @@ fn tramp_method_body(
     .unwrap_or(Ok(JsValue::UNDEFINED))
 }
 
+// A method trampoline is bound to the object it was read from, which a detached call still
+// uses. A call with a `this` (a wrapper's `original.call(this)` on an instance) runs on it.
+fn method_receiver(this_v8: JsValue, recv_handle: u64, ctx: &mut Context) -> BoaValue {
+    // A sloppy-mode detached call passes the global as `this`.
+    if this_v8.is_undefined() || this_v8 == JsValue::from(js_sys::global()) {
+        return get_boa(recv_handle)
+            .map(Into::into)
+            .unwrap_or_else(BoaValue::undefined);
+    }
+    // Our own V8 wrapper unwraps to its boa original without the Promise probe in v8_to_boa.
+    if let Some(o) = boa_unwrap_handle(&this_v8).and_then(get_boa) {
+        return o.into();
+    }
+    v8_to_boa(this_v8, ctx)
+}
+
 // Build the three shims once; deliberately leaked for the isolate's
 // life (same bounded-singleton class as the proxy shims + FR callback).
 fn tramp_shims() -> (JsValue, JsValue, JsValue) {
@@ -2712,7 +2882,7 @@ fn tramp_shims() -> (JsValue, JsValue, JsValue) {
     type R = Result<JsValue, JsValue>;
     let call = Closure::<dyn Fn(f64, J, J) -> R>::new(tramp_call_body);
     let ctor = Closure::<dyn Fn(f64, J) -> R>::new(tramp_construct_body);
-    let method = Closure::<dyn Fn(f64, f64, J) -> R>::new(tramp_method_body);
+    let method = Closure::<dyn Fn(f64, f64, J, J) -> R>::new(tramp_method_body);
     let t = (
         call.as_ref().clone(),
         ctor.as_ref().clone(),
@@ -2898,7 +3068,12 @@ fn shim_get(target: JsValue, key: JsValue, recv: JsValue) -> JsValue {
             }
             FnKeyOwner::FunctionProto => {}
         }
-        let res = o.get(pk, ctx);
+        let res = if inherited {
+            let receiver = v8_to_boa(recv.clone(), ctx);
+            boa_get_with_receiver(&o, pk, receiver, ctx)
+        } else {
+            o.get(pk, ctx)
+        };
         match res {
             Ok(bv) => match bv.as_object() {
                 Some(fobj) if fobj.is_callable() => {
@@ -2922,6 +3097,36 @@ fn shim_get(target: JsValue, key: JsValue, recv: JsValue) -> JsValue {
         }
     })
     .unwrap_or(JsValue::UNDEFINED)
+}
+
+// [[Get]] with an explicit receiver, so a boa getter inherited by a V8 object runs on that
+// object rather than on the prototype that holds it. Boa exposes this only as Reflect.get.
+fn boa_get_with_receiver(
+    o: &JsObject,
+    key: PropertyKey,
+    receiver: BoaValue,
+    ctx: &mut Context,
+) -> JsResult<BoaValue> {
+    let key: BoaValue = match key {
+        PropertyKey::String(s) => s.into(),
+        PropertyKey::Symbol(s) => s.into(),
+        PropertyKey::Index(i) => BoaValue::from(i.get()),
+    };
+    let reflect_get = ctx
+        .intrinsics()
+        .objects()
+        .reflect()
+        .get(js_string!("get"), ctx)?;
+    let Some(reflect_get) = reflect_get.as_callable() else {
+        return Err(JsNativeError::typ()
+            .with_message("Reflect.get is not callable")
+            .into());
+    };
+    reflect_get.call(
+        &BoaValue::undefined(),
+        &[o.clone().into(), key, receiver],
+        ctx,
+    )
 }
 
 enum FnKeyOwner {
@@ -2985,7 +3190,7 @@ fn shim_has(target: JsValue, key: JsValue) -> JsValue {
             return JsValue::from_bool(false);
         };
         let pk = v8_key_to_boa(&key, ctx);
-        if matches!(o.get(pk.clone(), ctx), Ok(ref v) if !v.is_undefined()) {
+        if o.has_property(pk.clone(), ctx).unwrap_or(false) {
             return JsValue::TRUE;
         }
         let shell = target.unchecked_ref::<Object>();
@@ -3539,12 +3744,12 @@ fn boa_desc_to_v8(d: &PropertyDescriptor, ctx: &mut Context) -> Object {
 }
 
 fn shim_get_proto(target: JsValue) -> JsValue {
+    // Not dyn_ref: its instanceof walks the target's chain, and a bridged class's chain runs
+    // through its superclasses' proxies, so every level would walk the rest again.
     // V8 owns function-prototype checks so `Function` tests cannot re-enter Boa.
     if target.is_function() {
-        if let Some(obj) = target.dyn_ref::<Object>() {
-            if let Ok(p) = Reflect::get_prototype_of(obj) {
-                return p.into();
-            }
+        if let Ok(p) = Reflect::get_prototype_of(target.unchecked_ref::<Object>()) {
+            return p.into();
         }
     }
     let named = target_handle_get(&target).and_then(|handle| {
@@ -3566,8 +3771,8 @@ fn shim_get_proto(target: JsValue) -> JsValue {
     if let Some(p) = named {
         return p;
     }
-    if let Some(obj) = target.dyn_ref::<Object>() {
-        if let Ok(p) = Reflect::get_prototype_of(obj) {
+    if target.is_object() {
+        if let Ok(p) = Reflect::get_prototype_of(target.unchecked_ref::<Object>()) {
             return p.into();
         }
     }
@@ -3817,21 +4022,46 @@ fn boa_fn_to_v8_proxy(tramp: JsValue, boa_pin: u64, ctx: &mut Context) -> JsValu
         let _ = Reflect::set(&desc, &JsValue::from_str("writable"), &JsValue::FALSE);
         let _ = Reflect::define_property(&target, &JsValue::from_str("prototype"), &desc);
     }
-    if let Some(sup) = get_boa(boa_pin).and_then(|o| boa_fn_v8_super(&o, ctx)) {
-        if let Some(sup) = sup.dyn_ref::<Object>() {
-            let _ = Reflect::set_prototype_of(&target, sup);
+    if let Some(sup) = get_boa(boa_pin).and_then(|o| boa_fn_parent(&o, ctx)) {
+        if sup.is_function() || sup.is_object() {
+            let _ = Reflect::set_prototype_of(&target, sup.unchecked_ref());
         }
     }
     target_handle_set(&target, boa_pin);
     Proxy::new(&target, &shared_fn_handler()).into()
 }
 
-fn boa_fn_v8_super(o: &JsObject, ctx: &mut Context) -> Option<JsValue> {
+// The V8 shell inherits from the immediate superclass, so V8 sees the real class chain
+// (Object.getPrototypeOf(Child) === Parent) and statics inherit level by level.
+fn boa_fn_parent(o: &JsObject, ctx: &mut Context) -> Option<JsValue> {
     let fproto = ctx.intrinsics().constructors().function().prototype();
-    let mut cur = o.prototype().clone();
-    for _ in 0..64 {
+    let parent = o.prototype().clone()?;
+    if JsObject::equals(o, &fproto) || JsObject::equals(&parent, &fproto) {
+        return None;
+    }
+    // A superclass is callable. Async functions and generators inherit from a non-callable
+    // intrinsic (%AsyncFunction.prototype%, ...) that must not become the shell's prototype,
+    // or V8 would lose Function.prototype for them; past it, link only a bridged V8 ancestor.
+    if !parent.is_callable() {
+        return bridged_v8_ancestor(&parent, &fproto, ctx);
+    }
+    // Converting the parent converts its own parent first, so bound the recursion as the
+    // other prototype walks in this file are bounded.
+    let depth = FN_PARENT_DEPTH.with(Cell::get);
+    if depth >= MAX_FN_PARENT_DEPTH {
+        return None;
+    }
+    FN_PARENT_DEPTH.with(|d| d.set(depth + 1));
+    let parent = boa_to_v8(&parent.into(), ctx);
+    FN_PARENT_DEPTH.with(|d| d.set(depth));
+    Some(parent)
+}
+
+fn bridged_v8_ancestor(from: &JsObject, fproto: &JsObject, ctx: &mut Context) -> Option<JsValue> {
+    let mut cur = Some(from.clone());
+    for _ in 0..MAX_FN_PARENT_DEPTH {
         let c = cur?;
-        if JsObject::equals(&c, &fproto) {
+        if JsObject::equals(&c, fproto) {
             return None;
         }
         if let Some(h) = bridged_v8_handle(&c, ctx) {
@@ -3840,6 +4070,12 @@ fn boa_fn_v8_super(o: &JsObject, ctx: &mut Context) -> Option<JsValue> {
         cur = c.prototype().clone();
     }
     None
+}
+
+const MAX_FN_PARENT_DEPTH: u32 = 64;
+
+thread_local! {
+    static FN_PARENT_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 fn boa_object_to_v8_proxy(obj: JsObject) -> (JsValue, u64) {

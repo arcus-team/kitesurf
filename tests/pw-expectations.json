@@ -551,10 +551,6 @@
     "expected": "SKIP",
     "reason": "fails slowly (11s): Error: expect(received).toBe(expected) // Object.is equality"
   },
-  "page-autowaiting-no-hang.spec.ts::assigning location to about:blank": {
-    "expected": "FAIL",
-    "reason": "Error: page.evaluate: Execution context was destroyed, most likely because of a navigation."
-  },
   "page-autowaiting-no-hang.spec.ts::clicking a link intercepted by the Navigation API same-document": {
     "expected": "SKIP",
     "reason": "fails slowly (11s): Error: expect(locator).toHaveText(expected) failed"
@@ -1802,10 +1798,6 @@
   "page-screenshot.spec.ts::page screenshot › mask option › should remove elements based on attr": {
     "expected": "SKIP",
     "reason": "no kitesurf screenshot baseline"
-  },
-  "page-screenshot.spec.ts::page screenshot › mask option › should remove mask after screenshot": {
-    "expected": "FAIL",
-    "reason": "Error: page.screenshot: Error: TypeError: cannot read properties of undefined (reading 'push') (unknown at :1:52)"
   },
   "page-screenshot.spec.ts::page screenshot › mask option › should work": {
     "expected": "FAIL",

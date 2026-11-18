@@ -114,6 +114,7 @@ import {
   filterByQualifiedName,
   makeStyleSheetList,
   adoptedStyleSheets,
+  toAdoptedSheets,
   type DocumentFragmentImpl,
   type HtmlCollectionCls,
   type NodeListCls,
@@ -134,6 +135,7 @@ import {
   cloneWrapper,
   assertDocumentInsertAllowed,
   compareDocumentPosition,
+  documentBaseURI,
 } from "./node-base.js";
 import { __ks_documentImpl_location_get, __ks_documentImpl_location_set } from "./window.js";
 import { ksInternals } from "./internals.js";
@@ -171,37 +173,6 @@ function isShadowRootNode(node: unknown): boolean {
     return false;
   }
   return dom.shadowHostId(node._id) >= 0;
-}
-
-// Resolve the mutable <base href> against the caller's fallback URL.
-// Memoized per mutationSeq: every constructed CSS rule reads the base,
-// and each miss is a whole-document querySelector.
-let baseMemo: { seq: number; fallback: string; value: string } | null = null;
-function computeDocBaseURI(fallback: string): string {
-  const seq = ksState().mutationSeq;
-  if (baseMemo && baseMemo.seq === seq && baseMemo.fallback === fallback) return baseMemo.value;
-  const value = resolveDocBaseURI(fallback);
-  baseMemo = { seq, fallback, value };
-  return value;
-}
-function resolveDocBaseURI(fallback: string): string {
-  try {
-    const baseId = dom ? dom.querySelector("base[href]") : -1;
-    if (baseId && baseId > 0) {
-      // DomHandle has no getAttribute, so read through the Element wrapper.
-      const node = elementFor(baseId);
-      const href =
-        node && typeof node.getAttribute === "function" ? node.getAttribute("href") : null;
-      if (href != null && href !== "") {
-        try {
-          return new URL(String(href), fallback).toString();
-        } catch {
-          /* malformed: the spec falls back to the fallback URL */
-        }
-      }
-    }
-  } catch {}
-  return fallback;
 }
 
 const NODE_CONSTANTS = {
@@ -347,7 +318,7 @@ class DocumentImpl extends NodeBase implements Idl.Document {
       configurable: false,
     });
     Object.defineProperty(this, "baseURI", {
-      get: () => computeDocBaseURI(getCurrentUrl()),
+      get: () => documentBaseURI(getCurrentUrl()),
       enumerable: true,
       configurable: false,
     });
@@ -797,12 +768,8 @@ class DocumentImpl extends NodeBase implements Idl.Document {
   }
   // The IDL's type; the page's value is not checked beyond being iterable.
   set adoptedStyleSheets(v: Idl.CSSStyleSheet[]) {
-    // Clear, then push each sheet, so the mirror reconcile runs.
-    const a = adoptedStyleSheets;
-    a.length = 0;
-    if (v && typeof v[Symbol.iterator] === "function") {
-      for (const s of v) a.push(s);
-    }
+    const sheets = toAdoptedSheets(v);
+    adoptedStyleSheets.splice(0, adoptedStyleSheets.length, ...sheets);
   }
   // body when nothing has focus.
   get activeElement() {
@@ -1608,7 +1575,7 @@ class DetachedDocument implements Idl.Document {
     return this._baseUrl || "about:blank";
   }
   get baseURI() {
-    return computeDocBaseURI(this._baseUrl || "about:blank");
+    return documentBaseURI(this._baseUrl || "about:blank");
   }
   get characterSet() {
     return "UTF-8";

@@ -148,6 +148,24 @@ describe("renderer eviction and close", () => {
     expect(counts.loads).toBe(1);
     expect(counts.kills).toBe(1);
   });
+
+  it("collects garbage once it kills a closed renderer", async () => {
+    // Only Date is fake: the gc throttle is module state, so start well clear of it.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 0, 1, 1));
+    const gc = vi.fn();
+    vi.stubGlobal("gc", gc);
+    try {
+      const { counts, render, manager } = harness(async () => ({ bytes: new Uint8Array([1]) }));
+      expect((await render()).ok).toBe(true);
+      manager.close("connection closed");
+      expect(counts.kills).toBe(1);
+      await vi.waitFor(() => expect(gc).toHaveBeenCalledTimes(1));
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("renderer memory stats", () => {

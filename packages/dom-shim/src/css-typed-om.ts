@@ -2752,15 +2752,7 @@ export class StylePropertyMap extends StylePropertyMapReadOnly implements Idl.St
     ) {
       throw new TypeError("Expected one CSSStyleValue or string");
     }
-    for (const value of values) {
-      if (
-        value instanceof CSSStyleValue &&
-        value._associatedProperty &&
-        value._associatedProperty !== property
-      ) {
-        throw new TypeError("CSSStyleValue is associated with another property");
-      }
-    }
+    assertAssociatedWith(property, values);
     const value = values.length === 1 ? values[0] : values.map(String).join(", ");
     if (
       values.length > 1 &&
@@ -2860,6 +2852,7 @@ export class StylePropertyMap extends StylePropertyMapReadOnly implements Idl.St
     ) {
       throw new TypeError("Property does not accept multiple values");
     }
+    assertAssociatedWith(property, values);
     const current = this._declaration().getPropertyValue(property);
     const shorthand = property.startsWith("transition-")
       ? this._declaration().getPropertyValue("transition")
@@ -2882,6 +2875,19 @@ export class StylePropertyMap extends StylePropertyMapReadOnly implements Idl.St
     this._associatedValues.clear();
     const declaration = this._declaration();
     declaration.cssText = "";
+  }
+}
+
+// https://drafts.css-houdini.org/css-typed-om-1/#create-an-internal-representation
+function assertAssociatedWith(property: string, values: Array<CSSStyleValue | string>): void {
+  for (const value of values) {
+    if (
+      value instanceof CSSStyleValue &&
+      value._associatedProperty &&
+      value._associatedProperty !== property
+    ) {
+      throw new TypeError("CSSStyleValue is associated with another property");
+    }
   }
 }
 

@@ -26,6 +26,7 @@ import {
 } from "./page-script.ts";
 import { localTraceParentProps } from "../tracing-local.ts";
 import { isIsolateGoneError } from "./limit-registry.ts";
+import { collectRetiredWorkers } from "./retired-worker-gc.ts";
 
 const TEARDOWN_GRACE_MS = 1_000;
 
@@ -230,6 +231,7 @@ export function spawnDedicatedWorker(
           );
         }
         disposeStub(entrypoint);
+        collectRetiredWorkers();
       })();
       return terminated;
     },

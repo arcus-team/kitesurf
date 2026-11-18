@@ -2806,7 +2806,7 @@ export interface ShadowRoot extends DocumentFragment {
   // readonly customElementRegistry: CustomElementRegistry | null;
   readonly activeElement: Element | null;
   readonly styleSheets: StyleSheetList;
-  // adoptedStyleSheets: Array<CSSStyleSheet>;
+  adoptedStyleSheets: Array<CSSStyleSheet>;
   // readonly fullscreenElement: Element | null;
   getAnimations(): Array<Animation>;
 }

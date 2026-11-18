@@ -77,6 +77,12 @@ Engine-wide invariants. The owning code carries the detail; keep these in sync w
 - A new target has a live `about:blank` document: `ensurePageScript` (`cdp/dom.ts`) starts a lazy
   isolate, because many clients evaluate without navigating.
 - Layout is incremental. Work done at box construction needs explicit `CONSTRUCT_BOX` damage.
+- Offscreen inline text is evicted by default: after a resolve, an inline root more than two
+  viewport heights from the viewport drops its shaped text and keeps a 48-byte break summary that
+  layout replays, so paint, geometry and print are unchanged. Print and PDF pin their extent
+  (`inline_keep_extent`) so their text stays shaped, and `BaseDocument::set_inline_layout_eviction`
+  turns it off (Rust only, no wasm export). The work is vendor patch `blitz-dom/0078`; the
+  differential tests are `packages/core/src/layout/tests/inline_eviction.rs`.
 - Partial frames are composited in the renderer isolate (`SceneRasterizer`), so CDP clients
   never see one. The terminal scene stream is the exception; see `packages/engine/src/rbi.ts`.
 - `history.pushState` stays in the document unless the navigate URL opts in with
@@ -88,6 +94,10 @@ Do not undo these.
 
 - The sandbox ships a pure-JS `MessagePort`; page JS must never reach the native one.
 - Every outbound request needs a deadline, and an ignored response body must be cancelled.
+- The global's named-properties object (`packages/dom-shim/src/window.ts`) is an ordinary object,
+  never a Proxy: with a Proxy in the global's prototype chain, V8 resolves an unresolvable
+  reference without calling its `has` trap and assigns through `set`, so strict code created a
+  global instead of throwing ReferenceError.
 
 We do not shim single-subtest differences from the spec in the platform; we pin the test and report
 upstream. Reproduce by running the snippet under `node` and under
@@ -190,7 +200,8 @@ Use an explicit `KITESURF_PORT` or `--port` when other engines may be running, a
 ### Tests
 
 - Never run a full suite unless asked; the runners are slow and memory-hungry. CI runs the
-  Playwright lane, but not the e2e or WPT lanes. Before reporting work complete, run
+  Playwright lane and the WPT gate (`scripts/wpt-ci.sh`), but not the e2e lane; a fork's pull
+  request skips both, and main runs them once it merges. Before reporting work complete, run
   `pnpm run check` and the smallest relevant e2e subset. Uncaught workerd errors fail a run even
   if assertions pass.
 - Do not put `--` before test arguments; pnpm forwards it and the runners misread it.

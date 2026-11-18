@@ -52,9 +52,9 @@ Raster tile fills are not charged: their cost is dominated by covered
 area, which the viewport already bounds, so tile count is a poor proxy
 (20k 8px fills took 4.1 s against 1.5 s for 324k 2px fills).
 ---
- src/lib.rs               | 54 +++++++++++++++++++++++++++++++++-
- src/render.rs            | 69 ++++++++++++++++++++++++++++++++++++++++++-
- src/render/background.rs | 76 ++++++++++++++++++++++++++++++++++++++++++++++++
+ src/lib.rs               | 54 +++++++++++++++++++++++++++-
+ src/render.rs            | 69 +++++++++++++++++++++++++++++++++++-
+ src/render/background.rs | 76 ++++++++++++++++++++++++++++++++++++++++
  3 files changed, 197 insertions(+), 2 deletions(-)
 
 diff --git a/src/lib.rs b/src/lib.rs
@@ -144,7 +144,7 @@ index 456e528..2143923 100644
 
      // println!(
 diff --git a/src/render.rs b/src/render.rs
-index 83348ff..3f1e7b1 100644
+index 83348ff..d961a32 100644
 --- a/src/render.rs
 +++ b/src/render.rs
 @@ -5,7 +5,7 @@ mod clip_path;
@@ -257,7 +257,7 @@ index 83348ff..3f1e7b1 100644
 +            self.work_budget.set(painter.work_budget.get());
          }
      }
- 
+
 diff --git a/src/render/background.rs b/src/render/background.rs
 index 6f9ce97..a315c2c 100644
 --- a/src/render/background.rs
@@ -265,7 +265,7 @@ index 6f9ce97..a315c2c 100644
 @@ -477,6 +477,32 @@ impl ElementCx<'_, '_> {
              return;
          }
- 
+
 +        // The per-layer 4096-tile cap above bounds `tiles`, so the product below
 +        // fits and PAINT_WORK_BUDGET's tile term matches it. Zero tiles draws
 +        // nothing, and the per-tile division below needs a non-zero divisor.
@@ -298,7 +298,7 @@ index 6f9ce97..a315c2c 100644
 @@ -934,6 +960,56 @@ fn raster_axis_tiling(
  /// 52k ~6.5 s. A smaller tile across a bigger viewport is dropped instead.
  const MAX_GRADIENT_TILES: u64 = 24_000;
- 
+
 +/// The nodes rendering one tile of a usvg tree walks, the root group included,
 +/// counted only up to `limit + 1`: a tree past `limit` cannot be afforded, so
 +/// it is never walked whole. The walk is iterative because the tree nests as

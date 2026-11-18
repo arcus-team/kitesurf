@@ -15,6 +15,11 @@ so you can use it with CDP clients such as Puppeteer.
 > Local development uses `wrangler dev`. A Cloudflare Workers Paid plan is
 > required to run Kitesurf on Cloudflare.
 
+> [!WARNING]
+> Do not open untrusted sites with a local Kitesurf. Locally, Kitesurf runs
+> page JavaScript in `workerd`, which
+> [is not a hardened sandbox](https://developers.cloudflare.com/workers/local-development/#security-considerations).
+
 ## Requirements
 
 - [Bazelisk](https://github.com/bazelbuild/bazelisk), installed as `bazel`.
@@ -64,6 +69,29 @@ Set `KITESURF_PORT` when port `8787` is already in use:
 ```bash
 KITESURF_PORT=8799 pnpm run dev
 ```
+
+### Run many navigations locally
+
+Each navigation starts a new page isolate and stops the previous one. A local
+engine keeps a stopped isolate in memory until the engine's garbage collector
+runs. If you run many navigations in parallel, these isolates can use many
+gigabytes of memory.
+
+`pnpm run dev` starts the runtime with the V8 flag `--expose-gc`. The engine
+then runs garbage collection after it stops a page isolate. Pages do not get
+`gc()`. In one test, five parallel connections loaded 940 pages in total.
+Without the flag, the runtime stopped with a V8 out-of-memory error after about
+300 pages. With the flag, all 940 pages loaded and memory stayed below 4 GB.
+
+If you start `wrangler dev` directly, for example in a container, set the flag
+yourself. Run this from `packages/engine` and add your other options:
+
+```bash
+MINIFLARE_WORKERD_V8_FLAGS=--expose-gc wrangler dev --env local
+```
+
+If you set `MINIFLARE_WORKERD_V8_FLAGS` for `pnpm run dev`, your value replaces
+the default. Include `--expose-gc` in it.
 
 ## Connect with Puppeteer
 

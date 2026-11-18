@@ -412,9 +412,19 @@ export function extractTopLevelDecls(source: string): TopLevelDeclScan {
   return { names, varSites, varNames, varSiteNames };
 }
 
-export function predeclareVarsHead(names: readonly string[], global: string): string {
+export function predeclareVarsHead(
+  names: readonly string[],
+  global: string,
+  ownBindings = false,
+): string {
   if (names.length === 0) return "";
-  return `(function (names) { for (var gi = 0; gi < names.length; gi++) { try { var gn = names[gi]; var gd = Object.getOwnPropertyDescriptor(${global}, gn); if (!gd) { if (!(gn in ${global})) ${global}[gn] = undefined; continue; } var gSwallows = (gd.get || gd.set) ? !gd.set : gd.writable === false; if (gSwallows && gd.configurable) Object.defineProperty(${global}, gn, { value: ${global}[gn], writable: true, enumerable: true, configurable: true }); } catch (ge) {} } })(${JSON.stringify(names)});`;
+  // `ownBindings` is for a caller whose `global` is the real one, where a name the page can see is
+  // an own property and a `var` must shadow an inherited name. The other callers see a wrapper
+  // whose inherited names are the page's globals, so there only an absent name may be created.
+  const absent = ownBindings
+    ? `${global}[gn] = undefined;`
+    : `if (!(gn in ${global})) ${global}[gn] = undefined;`;
+  return `(function (names) { for (var gi = 0; gi < names.length; gi++) { try { var gn = names[gi]; var gd = Object.getOwnPropertyDescriptor(${global}, gn); if (!gd) { ${absent} continue; } var gSwallows = (gd.get || gd.set) ? !gd.set : gd.writable === false; if (gSwallows && gd.configurable) Object.defineProperty(${global}, gn, { value: ${global}[gn], writable: true, enumerable: true, configurable: true }); } catch (ge) {} } })(${JSON.stringify(names)});`;
 }
 
 export function hasUseStrictDirective(source: string): boolean {

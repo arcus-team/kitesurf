@@ -22,7 +22,66 @@ fn parse_full(html: &str) -> HtmlDocument {
 }
 
 fn scan_value(html: &str) -> Value {
-    serde_json::from_str(&crate::dom::scan::ks_scan_document(html)).expect("scan JSON parses")
+    let mut scanner = crate::dom::scan::DocScanner::new();
+    scanner.push(html.as_bytes());
+    serde_json::from_str(&scanner.finish()).expect("scan JSON parses")
+}
+
+fn scan_in_chunks(html: &str, chunk_bytes: usize) -> Value {
+    serde_json::to_value(crate::dom::scan::scan_document_in_chunks(html, chunk_bytes))
+        .expect("scan serializes")
+}
+
+#[test]
+fn scan_is_the_same_whatever_the_input_chunking() {
+    let html = "<!DOCTYPE html>\r\n<html><head><title>Tést &amp;\r\n café 😀</title>\
+        <base href=\"/b/\"><meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'self'\">\
+        <script type=\"importmap\">{\"imports\":{\"a\":\"./é.js\"}}</script></head><body>\
+        <!-- c --><script src=\"x.js\" nonce=\"n\"></script><script>let s = '</scr' + 'ipt>é';\0\
+        </script><svg><script>1</script></svg><textarea><script>no</script></textarea>\
+        <iframe src=\"f.html\" srcdoc=\"&lt;p&gt;\"></iframe><p>&notin;&#x1F600;&#128512;</p></body></html>";
+    let whole = scan_in_chunks(html, html.len());
+
+    assert_eq!(
+        whole,
+        scan_value(html),
+        "the exported scan reads the same document"
+    );
+    assert!(
+        whole["scripts"].as_array().is_some_and(|s| s.len() >= 2),
+        "{whole}"
+    );
+
+    for chunk_bytes in [1, 2, 3, 5, 7, 64] {
+        assert_eq!(
+            scan_in_chunks(html, chunk_bytes),
+            whole,
+            "chunks of {chunk_bytes} bytes"
+        );
+    }
+}
+
+// The XHTML sniff settles only at the root tag, after the leading comment; until then the scan
+// holds the input back, since XHTML closes `<script/>` where HTML would read on as script text.
+#[test]
+fn xhtml_scan_is_the_same_whatever_the_input_chunking() {
+    let html = "<!-- lead é -->\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head>\
+        <title>X</title><script src=\"a.js\"/><script src=\"b.js\"></script></head><body/></html>";
+    let whole = scan_value(html);
+
+    assert_eq!(
+        whole["scripts"].as_array().map(Vec::len),
+        Some(2),
+        "{whole}"
+    );
+
+    for chunk_bytes in [1, 2, 3, 5, 7, 64, html.len()] {
+        assert_eq!(
+            scan_in_chunks(html, chunk_bytes),
+            whole,
+            "chunks of {chunk_bytes} bytes"
+        );
+    }
 }
 
 fn element_local(doc: &BaseDocument, id: NodeId) -> Option<&str> {
@@ -34,20 +93,20 @@ fn element_local(doc: &BaseDocument, id: NodeId) -> Option<&str> {
 
 fn element_is_html_ns(doc: &BaseDocument, id: NodeId) -> bool {
     match &doc.get_node(id).map(|n| &n.data) {
-        Some(NodeData::Element(d)) => &*d.name.ns == "http://www.w3.org/1999/xhtml",
+        Some(NodeData::Element(d)) => &**d.namespace() == "http://www.w3.org/1999/xhtml",
         _ => false,
     }
 }
 
 fn has_ancestor_in(doc: &BaseDocument, id: NodeId, names: &[&str]) -> bool {
-    let mut cur = doc.get_node(id).and_then(|n| n.parent);
+    let mut cur = doc.get_node(id).and_then(|n| n.parent_id());
     while let Some(pid) = cur {
         if let Some(local) = element_local(doc, pid) {
             if names.contains(&local) {
                 return true;
             }
         }
-        cur = doc.get_node(pid).and_then(|n| n.parent);
+        cur = doc.get_node(pid).and_then(|n| n.parent_id());
     }
     false
 }
@@ -57,7 +116,7 @@ fn attrs_of(doc: &BaseDocument, id: NodeId) -> Vec<(String, String)> {
         Some(NodeData::Element(d)) => d
             .attrs
             .iter()
-            .map(|a| (str::to_ascii_lowercase(&a.name.local), a.value.clone()))
+            .map(|a| (str::to_ascii_lowercase(&a.name.local), a.value.to_string()))
             .collect(),
         _ => Vec::new(),
     }
@@ -519,7 +578,7 @@ fn html_doctype_with_xhtml_later_on_its_line_parses_as_html() {
     let document = parse_full(html);
     let doc: &BaseDocument = &document;
     let title = doc.query_selector_all("title").unwrap()[0];
-    let parent = doc.get_node(title).and_then(|n| n.parent).unwrap();
+    let parent = doc.get_node(title).and_then(|n| n.parent_id()).unwrap();
     assert_eq!(
         element_local(doc, parent),
         Some("head"),
@@ -840,4 +899,24 @@ fn meta_csp_is_captured_in_document_order() {
     assert_eq!(csp.len(), 2);
     assert_eq!(csp[0], "script-src 'self'");
     assert_eq!(csp[1], "default-src https:");
+}
+
+// html5ever's tokenizer drops a leading U+FEFF on every `feed`, and the scanner feeds it once per
+// chunk, so only the document's own first character is a BOM: one that starts a later chunk is
+// part of the script text.
+#[test]
+fn a_byte_order_mark_inside_the_document_survives_chunking() {
+    let html = "<script>window.x='aaa\u{feff}'</script>";
+    let whole = scan_value(html);
+    assert_eq!(
+        scan_in_chunks(html, html.len()),
+        whole,
+        "one push reads the document"
+    );
+    let boundary = "<script>window.x='aaa".len();
+    assert_eq!(
+        scan_in_chunks(html, boundary),
+        whole,
+        "a U+FEFF that starts the second chunk is script text"
+    );
 }

@@ -2,7 +2,7 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 // https://opensource.org/licenses/Apache-2.0
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { spawnDedicatedWorker } from "../src/eval/dedicated-worker.ts";
 
 function harness(opts: { openError?: Error; deliverError?: Error } = {}) {
@@ -77,5 +77,23 @@ describe("dedicated worker teardown", () => {
     await handle.deliverMessage("x");
     await handle.terminate("cpu limit", { gone: true });
     expect(kills).toEqual([]);
+  });
+
+  it("collects garbage once a terminated worker is torn down", async () => {
+    // Only Date is fake: the gc throttle is module state, so start well clear of it.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 0, 1, 1));
+    const gc = vi.fn();
+    vi.stubGlobal("gc", gc);
+    try {
+      const { handle, kills } = harness();
+      await handle.deliverMessage("x");
+      await handle.terminate("worker.terminate()");
+      expect(kills).toEqual(["worker.terminate()"]);
+      expect(gc).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
   });
 });

@@ -257,6 +257,55 @@ describe("PageScriptRpcSession", () => {
     }
   });
 
+  it("collects garbage once the kill settles, so the retired isolate can go", async () => {
+    vi.useFakeTimers();
+    // The gc throttle is module state; start well clear of any earlier collection.
+    vi.setSystemTime(Date.UTC(2026, 0, 1, 1));
+    const gc = vi.fn();
+    vi.stubGlobal("gc", gc);
+    try {
+      let releaseKill = () => {};
+      const fake = makeFake();
+      fake.entrypoint.killIsolate = () => new Promise<void>((resolve) => (releaseKill = resolve));
+      const s = openPageScriptRpcSession(fake.entrypoint);
+      await s.syncCookies("warm=up");
+
+      s.close("generation bump");
+      const killing = s.killIsolate("generation bump");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(gc, "no collection while the kill is in flight").not.toHaveBeenCalled();
+
+      releaseKill();
+      await killing;
+      expect(gc).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it("collects garbage when the entrypoint's kill rejects", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.UTC(2026, 0, 1, 2));
+    const gc = vi.fn();
+    vi.stubGlobal("gc", gc);
+    try {
+      const fake = makeFake();
+      fake.entrypoint.killIsolate = () => Promise.reject(new Error("kill failed"));
+      const s = openPageScriptRpcSession(fake.entrypoint);
+      await s.syncCookies("warm=up");
+
+      s.close("generation bump");
+      const killing = s.killIsolate("generation bump");
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(killing).resolves.toBeUndefined();
+      expect(gc).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
   it("routes upstream events through the registered handler", async () => {
     const fake = makeFake();
     const s = openPageScriptRpcSession(fake.entrypoint);
