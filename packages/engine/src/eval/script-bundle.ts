@@ -178,7 +178,7 @@ function buildClassicSegment(
   const predeclareHead =
     liveVarNames.length === 0
       ? ""
-      : `// === ${label} (live-globalize top-level vars) ===\n${predeclareVarsHead(liveVarNames, "globalThis")}\n`;
+      : `// === ${label} (live-globalize top-level vars) ===\n${predeclareVarsHead(liveVarNames, "globalThis", true)}\n`;
   const liveVarSet = new Set(liveVarNames);
   const topDecls = scan.names.filter((n) => !liveVarSet.has(n));
   let promoteTail = "";

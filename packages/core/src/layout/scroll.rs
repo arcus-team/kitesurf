@@ -226,15 +226,15 @@ impl DomHandle {
             let has_box = generates_box(&doc, node);
             let mut scroll_width = layout.scroll_width();
             let mut scroll_height = layout.scroll_height();
-            if node.id == doc.root_element().id {
+            if node.id() == doc.root_element().id() {
                 scroll_width = 0.0;
                 scroll_height = 0.0;
                 let root_client_width =
                     (layout.size.width - layout.border.left - layout.border.right).max(0.0);
                 let root_client_height =
                     (layout.size.height - layout.border.top - layout.border.bottom).max(0.0);
-                let body_layout = doc.root_element().children.iter().find_map(|child_id| {
-                    let child = doc.get_node(*child_id)?;
+                let body_layout = doc.root_element().children().iter().find_map(|child_id| {
+                    let child = doc.get_node(child_id)?;
                     (child
                         .element_data()
                         .is_some_and(|element| element.name.local == local_name!("body"))
@@ -255,12 +255,12 @@ impl DomHandle {
                 }
                 // Root and root-hoisted abspos children contribute to document
                 // scroll; fixed boxes do not.
-                let layout_children = doc.root_element().layout_children.borrow();
-                let hoisted_children = doc.root_element().hoisted_children.borrow();
+                let layout_children = doc.root_element().layout_children();
+                let hoisted_children = doc.root_element().hoisted_children();
                 let root_children = layout_children
                     .iter()
-                    .flatten()
-                    .chain(hoisted_children.iter());
+                    .chain(hoisted_children.iter())
+                    .flat_map(|children| children.iter());
                 for child in root_children.filter_map(|id| doc.get_node(*id)) {
                     if child
                         .primary_styles()
@@ -338,9 +338,11 @@ impl DomHandle {
             let scroll_height = layout.scroll_height() as f64;
             let clamped_x = x.clamp(0.0, scroll_width.max(0.0));
             let clamped_y = y.clamp(0.0, scroll_height.max(0.0));
+            let previous_y = node.scroll_offset().y;
             node.scroll_offset_mut().x = clamped_x;
             node.scroll_offset_mut().y = clamped_y;
             doc.note_boxes_moved(&[node_id]);
+            doc.note_inner_scroll(clamped_y - previous_y);
             Some(ScrollOffset {
                 x: clamped_x,
                 y: clamped_y,

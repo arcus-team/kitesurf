@@ -31,6 +31,7 @@ import { recordOp, recordCdpMutation } from "./record.js";
 import {
   nodeIndexOf,
   childArray,
+  hasLiveRanges,
   rangeAfterInsert,
   rangeBeforeRemove,
   rangeBeforeReplaceData,
@@ -38,7 +39,6 @@ import {
 } from "./range.js";
 import { runIteratorPreRemove } from "./traversal.js";
 import { ksSpan } from "./otel.js";
-import { stampConnectedNamedGlobals } from "./window.js";
 import {
   cache,
   hasLiveWrapper,
@@ -55,6 +55,7 @@ import {
   stampedPiIds,
   commentData,
   nodeListCache,
+  nodeListGetters,
   parsedHandle,
   registerParsedHandle,
 } from "./registries.js";
@@ -102,6 +103,12 @@ import { addListener, removeListener } from "./events/dispatch.js";
 import { dispatchOnKey } from "./events/dispatch.js";
 import { maybeScheduleSlotchange } from "./events/slotchange.js";
 import { ksInternals } from "./internals.js";
+import {
+  captureNamedGlobals,
+  forgetCapturedNamedGlobals,
+  installConnectedNamedGlobals,
+  syncNamedGlobals,
+} from "./window.js";
 
 const MAX_CONNECTED_NODE_ANCESTOR_HOPS = 8192;
 
@@ -128,8 +135,101 @@ export type AdoptableNode = {
   ownerDocument?: unknown;
 };
 
-// _id as the tree checks read it off any node argument: a DetachedDocument has
-// none, a live wrapper has its own, and a DOMParser node has both.
+// Above this many children, sibling walks reuse one built child list instead of rescanning ids.
+const MAX_UNLISTED_CHILD_SCAN = 32;
+
+// Repeated reads under one parent reuse the ids until a child list changes anywhere.
+let cachedChildIds: Uint32Array = new Uint32Array(0);
+let cachedChildIdsParent = -1;
+let cachedChildIdsSeq = -1;
+
+// Child ids of `parent` when one neighbour can be read without building and wrapping the whole
+// child list (prepend and insertBefore read ends and siblings of nodes never listed). Documents
+// keep their own list because it repositions the synthetic doctype.
+function unlistedChildIds(parent: NodeBase | DetachedDocument): Uint32Array | null {
+  if (
+    !(parent instanceof NodeBase) ||
+    parent._id < 0 ||
+    nodeListCache.has(parent) ||
+    parent.nodeType === DOCUMENT_NODE
+  ) {
+    return null;
+  }
+  const seq = ksState().childSeq | 0;
+  if (cachedChildIdsParent !== parent._id || cachedChildIdsSeq !== seq) {
+    cachedChildIds = dom.childIds(parent._id);
+    cachedChildIdsParent = parent._id;
+    cachedChildIdsSeq = seq;
+  }
+  return cachedChildIds.length <= MAX_UNLISTED_CHILD_SCAN ? cachedChildIds : null;
+}
+
+// The first wrapper found walking `ids` from `start` by `step`, skipping ids that cannot wrap,
+// exactly as the built list filters them.
+function wrapperFrom(ids: Uint32Array, start: number, step: number): NodeBase | null {
+  for (let i = start; i >= 0 && i < ids.length; i += step) {
+    const child = cache.get(ids[i]) || nodeFor(ids[i]);
+    if (child) return child;
+  }
+  return null;
+}
+
+// The live child list of a NodeBase. Elements build it here, not through `childNodes`, so a
+// page that patches that getter cannot change firstChild or sibling reads (as in browsers).
+function ownChildNodes(node: NodeBase): NodeListCls<NodeBase> {
+  const cached = nodeListCache.get(node);
+  if (cached) return cached;
+  const id = node._id;
+  const list = makeNodeList(() => {
+    const ids = Array.from(dom.childIds(id));
+    return ids
+      .map((cid) => cache.get(cid) || nodeFor(cid))
+      .filter((n): n is NodeBase => n !== null);
+  }, "childSeq");
+  nodeListCache.set(node, list);
+  return list;
+}
+
+// Documents keep their own list because it repositions the synthetic doctype.
+function ownChildArray(parent: NodeBase | DetachedDocument): ArrayLike<NodeBase> {
+  if (!(parent instanceof NodeBase) || parent.nodeType === DOCUMENT_NODE) {
+    return childArray(parent);
+  }
+  const list = ownChildNodes(parent);
+  const get = nodeListGetters.get(list);
+  return get ? get() : list;
+}
+
+function edgeChild(node: NodeBase, edge: "first" | "last"): NodeBase | null {
+  const ids = unlistedChildIds(node);
+  if (ids) {
+    return edge === "first" ? wrapperFrom(ids, 0, 1) : wrapperFrom(ids, ids.length - 1, -1);
+  }
+  const kids = ownChildArray(node);
+  if (kids.length === 0) return null;
+  return edge === "first" ? kids[0] : kids[kids.length - 1];
+}
+
+function adjacentSibling(node: NodeBase, side: "next" | "previous"): NodeBase | null {
+  const parent = node.parentNode;
+  if (!parent) return null;
+
+  const step = side === "next" ? 1 : -1;
+  const ids = node._id < 0 ? null : unlistedChildIds(parent);
+  if (ids) {
+    const index = ids.indexOf(node._id);
+    return index < 0 ? null : wrapperFrom(ids, index + step, step);
+  }
+
+  const kids = ownChildArray(parent);
+  const index = indexById(kids, node._id);
+  if (index < 0) return null;
+  return kids[index + step] ?? null;
+}
+
+// _id and _dom as the tree checks read them off any node argument: a
+// DetachedDocument has neither, a live wrapper has no _dom, and a DOMParser
+// node has both.
 function treeId(n: object): unknown {
   return Reflect.get(n, "_id");
 }
@@ -295,11 +395,16 @@ export function subtreeHasCachedWrapper(nodeId: number): boolean {
   return unwrappedSubtreeIds(nodeId) === null;
 }
 
-function dropUnwrappedSubtree(nodeId: number): boolean {
+// One subtree, for a caller that has to know which children the drop freed.
+export function dropUnwrappedSubtree(nodeId: number): boolean {
   if (nodeId < 0) return false;
   const droppedIds = unwrappedSubtreeIds(nodeId);
-  if (!droppedIds || !dom.dropNode(nodeId)) return false;
+  if (!droppedIds) return false;
+  // The drop frees the nodes, so the names their ids installed are read first.
+  const names = captureNamedGlobals(droppedIds);
+  if (!dom.dropNode(nodeId)) return false;
   forgetNodeIds(droppedIds);
+  forgetCapturedNamedGlobals(names);
   return true;
 }
 
@@ -851,6 +956,8 @@ class NodeBase extends KsEventTarget implements Idl.Node {
     const text = String(value ?? "");
     const existing: NodeBase[] = [];
     const removedIds: number[] = [];
+    // Children a drop did not free: only these still exist in wasm to lose a name.
+    const keptIds: number[] = [];
     const rawIds = Array.from(dom.childIds(this._id));
     const observed = hasChildListObserver(this._id);
     const transientlyObserved = hasSubtreeObserver(this._id);
@@ -858,6 +965,7 @@ class NodeBase extends KsEventTarget implements Idl.Node {
       removedIds.push(cid);
       // Preserve wrapped removed nodes when an observer needs them in the childList record.
       if (!observed && dropUnwrappedSubtree(cid)) continue;
+      keptIds.push(cid);
       if (transientlyObserved) registerTransientObservers(cid);
       const c = nodeFor(cid);
       if (!c) continue;
@@ -881,6 +989,8 @@ class NodeBase extends KsEventTarget implements Idl.Node {
       }
     }
     bumpMutationSeq("text");
+    // A dropped child's names went with the drop; only the kept children are left to read.
+    for (const cid of keptIds) syncNamedGlobals(cid);
     for (const cid of removedIds) {
       recordCdpMutation({
         kind: "childNodeRemoved",
@@ -901,26 +1011,14 @@ class NodeBase extends KsEventTarget implements Idl.Node {
     }
   }
   get childNodes(): NodeListCls<NodeBase> {
-    const cached = nodeListCache.get(this);
-    if (cached) return cached;
-    const id = this._id;
-    const list = makeNodeList(() => {
-      const ids = Array.from(dom.childIds(id));
-      return ids
-        .map((cid) => cache.get(cid) || nodeFor(cid))
-        .filter((n): n is NodeBase => n !== null);
-    }, "childSeq");
-    nodeListCache.set(this, list);
-    return list;
+    return ownChildNodes(this);
   }
   get firstChild(): NodeBase | null {
     if (this == null) return null;
-    const kids = childArray(this);
-    return kids.length > 0 ? kids[0] : null;
+    return edgeChild(this, "first");
   }
   get lastChild(): NodeBase | null {
-    const kids = childArray(this);
-    return kids.length > 0 ? kids[kids.length - 1] : null;
+    return edgeChild(this, "last");
   }
   hasChildNodes() {
     return this.childNodes.length > 0;
@@ -1013,16 +1111,10 @@ class NodeBase extends KsEventTarget implements Idl.Node {
   }
   get nextSibling(): NodeBase | null {
     if (this == null) return null;
-    const kids = parentChildArray(this);
-    if (!kids) return null;
-    const i = indexById(kids, this._id);
-    return i >= 0 && i + 1 < kids.length ? kids[i + 1] : null;
+    return adjacentSibling(this, "next");
   }
   get previousSibling(): NodeBase | null {
-    const kids = parentChildArray(this);
-    if (!kids) return null;
-    const i = indexById(kids, this._id);
-    return i > 0 ? kids[i - 1] : null;
+    return adjacentSibling(this, "previous");
   }
   // A child with nodeType ELEMENT_NODE is an Element wrapper.
   get nextElementSibling(): Element | null {
@@ -1107,7 +1199,7 @@ class NodeBase extends KsEventTarget implements Idl.Node {
       recordChildListMutation(child, [], kids, null, null);
       recordChildListMutation(this, kids, [], prevSiblingForAdd, null);
       for (const k of kids) {
-        stampConnectedNamedGlobals(k._id);
+        installConnectedNamedGlobals(k._id);
         notifySubtreeInserts(k);
         notifyConnectedCallbacks(k);
       }
@@ -1163,7 +1255,9 @@ class NodeBase extends KsEventTarget implements Idl.Node {
         recordChildListMutation(oldParent, [], [child], oldPrevSibling, oldNextSibling);
       }
       recordChildListMutation(this, [child], [], prevSiblingForAdd, null);
-      stampConnectedNamedGlobals(child._id);
+      // A child that had a parent may have left the document; a fresh one had no name to lose.
+      if (oldParent) syncNamedGlobals(child._id);
+      else installConnectedNamedGlobals(child._id);
       notifySubtreeInserts(child);
       notifyConnectedCallbacks(child);
       return child;
@@ -1263,7 +1357,7 @@ class NodeBase extends KsEventTarget implements Idl.Node {
       recordChildListMutation(newChild, [], kids, null, null);
       recordChildListMutation(this, kids, [], prevSiblingForAdd, nextSiblingForAdd);
       for (const k of kids) {
-        stampConnectedNamedGlobals(k._id);
+        installConnectedNamedGlobals(k._id);
         notifySubtreeInserts(k);
         notifyConnectedCallbacks(k);
       }
@@ -1302,8 +1396,13 @@ class NodeBase extends KsEventTarget implements Idl.Node {
       }
     } catch {}
     const intraParent = oldParent === this;
-    const insertBeforeOldIndex = oldParent ? nodeIndexOf(newChild) : -1;
-    const refIndex = refChild ? nodeIndexOf(refChild) : dom.childIds(this._id).length;
+    // Only live ranges read these indexes, and computing one wraps every sibling.
+    const tracksRanges = hasLiveRanges();
+    const insertBeforeOldIndex = oldParent && tracksRanges ? nodeIndexOf(newChild) : -1;
+    let refIndex = -1;
+    if (tracksRanges) {
+      refIndex = refChild ? nodeIndexOf(refChild) : dom.childIds(this._id).length;
+    }
     try {
       const curParent = dom.parentId(newId);
       if (curParent === this._id) {
@@ -1340,7 +1439,9 @@ class NodeBase extends KsEventTarget implements Idl.Node {
       recordChildListMutation(oldParent, [], [newChild], oldPrevSibling, oldNextSibling);
     }
     recordChildListMutation(this, [newChild], [], prevSiblingForAdd, nextSiblingForAdd);
-    stampConnectedNamedGlobals(newChild._id);
+    // A child that had a parent may have left the document; a fresh one had no name to lose.
+    if (oldParent) syncNamedGlobals(newChild._id);
+    else installConnectedNamedGlobals(newChild._id);
     notifySubtreeInserts(newChild);
     notifyConnectedCallbacks(newChild);
     return newChild;
@@ -1390,6 +1491,7 @@ class NodeBase extends KsEventTarget implements Idl.Node {
       nodeId: removedNodeId,
     });
     recordChildListMutation(this, [], [child], removedPrev, removedNext);
+    syncNamedGlobals(removedNodeId);
     return child;
   }
   replaceChild<T extends NodeBase>(newChild: NodeBase, oldChild: T): T {
@@ -1502,7 +1604,10 @@ class NodeBase extends KsEventTarget implements Idl.Node {
     }
     const swapRemoved = isSelfReplace ? [] : [oldChild];
     recordChildListMutation(this, [newChild], swapRemoved, swapPrev, swapNext);
-    stampConnectedNamedGlobals(newChild._id);
+    // The inserted node takes its names; the replaced one loses them unless it is the same node,
+    // which sync sees as still connected.
+    syncNamedGlobals(newChild._id);
+    syncNamedGlobals(oldChild._id);
     return oldChild;
   }
   before(...nodes: Array<NodeBase | string>): void {
@@ -1931,28 +2036,50 @@ NodeBase.prototype.isDefaultNamespace = function (namespace: string | null): boo
   const def = this.lookupNamespaceURI(null);
   return def === ns;
 };
-function computeBaseURI(): string {
-  const docUrl = pageUrl || "about:blank";
+// The document's base URL: the first connected <base href> resolved against `fallback`.
+// The base epoch moves whenever that can change, so the lookup reruns only then; a borrowed
+// document reports -1 and always reruns.
+let baseURIState: { dom: DomHandle; epoch: number; fallback: string; value: string } | null = null;
+export function documentBaseURI(fallback: string): string {
+  const epoch = dom ? dom.baseEpoch() : -1;
+  const cached = baseURIState;
+  if (
+    cached &&
+    epoch >= 0 &&
+    cached.dom === dom &&
+    cached.epoch === epoch &&
+    cached.fallback === fallback
+  ) {
+    return cached.value;
+  }
+  const value = resolveBaseURI(fallback);
+  baseURIState = dom && epoch >= 0 ? { dom, epoch, fallback, value } : null;
+  return value;
+}
+function resolveBaseURI(fallback: string): string {
   try {
     const baseId = dom ? dom.querySelector("base[href]") : -1;
     if (baseId && baseId > 0) {
+      // DomHandle has no getAttribute, so read through the Element wrapper.
       const node = elementFor(baseId);
       const href =
         node && typeof node.getAttribute === "function" ? node.getAttribute("href") : null;
       if (href != null && href !== "") {
         try {
-          return new URL(String(href), docUrl).toString();
-        } catch {}
+          return new URL(String(href), fallback).toString();
+        } catch {
+          /* malformed: the spec falls back to the fallback URL */
+        }
       }
     }
   } catch {}
-  return docUrl;
+  return fallback;
 }
 Object.defineProperty(NodeBase.prototype, "baseURI", {
   configurable: true,
   enumerable: true,
   get: function () {
-    return computeBaseURI();
+    return documentBaseURI(pageUrl || "about:blank");
   },
 });
 

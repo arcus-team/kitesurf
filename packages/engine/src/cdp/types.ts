@@ -42,6 +42,14 @@ export interface CdpSuccess {
   sessionId?: string;
 }
 
+export class RawJsonResult {
+  constructor(
+    readonly pieces: readonly string[],
+    /** The parsed result, for in-process callers; a result may parse cheaper than its text. */
+    readonly parse: () => unknown = () => JSON.parse(pieces.join("")),
+  ) {}
+}
+
 export interface CdpError {
   id: number;
   error: { code: number; message: string };
@@ -286,6 +294,9 @@ export interface TargetState {
   url: string;
   title: string;
   html: string;
+  // The source was dropped once PageScript owned a large document, so a later fallback read
+  // must fail rather than report an empty page.
+  fallbackHtmlReleased: boolean;
   dom: DomHandle | null;
   docScan: DocScan | null;
   domEpoch: number;
@@ -320,6 +331,9 @@ export interface TargetState {
   nextNavigationHistoryId: number;
   viewportWidth: number | null;
   viewportHeight: number | null;
+  // Emulated device pixel ratio. Rendering stays in CSS pixels, but Playwright
+  // divides a `scale: "css"` screenshot's clip scale by it.
+  deviceScaleFactor: number;
   screencastConfigurationBarrier: Promise<void>;
   screencastConfigurationVersion: number;
   emulatedMedia: "screen" | "print";

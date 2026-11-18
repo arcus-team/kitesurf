@@ -42,8 +42,6 @@ dependencies = [
 [[package]]
 name = "anyrender_svg"
 version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39327debd1bdca190d086c107825a5dc4c665be31e99e5c0854345a050d08cad"
 dependencies = [
  "anyrender",
  "image",
@@ -156,6 +154,7 @@ dependencies = [
  "bitflags 2.13.2",
  "blitz-traits",
  "color",
+ "compact_str",
  "cssparser",
  "cursor-icon",
  "debug_timer",
@@ -176,7 +175,6 @@ dependencies = [
  "rayon",
  "selectors",
  "skrifa 0.44.0",
- "slotmap",
  "smallvec",
  "stylo",
  "stylo_dom",
@@ -227,8 +225,6 @@ dependencies = [
 [[package]]
 name = "blitz-traits"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d339c3ff7fe8bed623e27695a4c15dd1ec8faa9bf9158b7475bf180280e4018c"
 dependencies = [
  "atomic_refcell",
  "bitflags 2.13.2",
@@ -1563,6 +1559,7 @@ dependencies = [
  "cssparser",
  "encoding_rs",
  "euclid",
+ "fdeflate",
  "flate2",
  "foldhash 0.2.0",
  "futures-util",
@@ -1583,6 +1580,7 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "rustc-hash",
+ "ryu-js",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
@@ -1959,6 +1957,7 @@ dependencies = [
  "parley_engine",
  "skrifa 0.44.0",
  "smallvec",
+ "thin-vec",
 ]
 
 [[package]]
@@ -1993,6 +1992,7 @@ dependencies = [
  "parley_data",
  "parley_emoji",
  "skrifa 0.44.0",
+ "thin-vec",
 ]
 
 [[package]]
@@ -2421,6 +2421,8 @@ dependencies = [
  "anyrender",
  "anyrender_vello_cpu",
  "console_error_panic_hook",
+ "crc32fast",
+ "fdeflate",
  "flate2",
  "foldhash 0.2.0",
  "getrandom 0.2.17",
@@ -2527,6 +2529,8 @@ version = "0.0.1"
 dependencies = [
  "anyrender",
  "anyrender_vello_cpu",
+ "crc32fast",
+ "fdeflate",
  "flate2",
  "foldhash 0.2.0",
  "image",

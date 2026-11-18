@@ -119,6 +119,9 @@ export interface EngineE2EOptions {
 }
 
 export function engineE2EConfig(opts: EngineE2EOptions): ReturnType<typeof defineConfig> {
+  // Match `pnpm run dev`: Miniflare passes these to workerd, so the engine collects retired page
+  // isolates (src/eval/retired-worker-gc.ts) and tests see that pages do not get gc().
+  process.env.MINIFLARE_WORKERD_V8_FLAGS ??= "--expose-gc";
   process.env.KS_E2E_WRANGLER_CONFIG = opts.wranglerConfig;
   process.env.KS_E2E_ENGINE_DIST = opts.engineDist;
   process.env.KS_E2E_FIXTURE_WORKER_BUILDS = JSON.stringify(

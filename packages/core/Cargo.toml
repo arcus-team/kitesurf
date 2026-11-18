@@ -113,6 +113,8 @@ linebender_resource_handle = "0.1"
 
 wuff = { workspace = true }
 png = { workspace = true }
+fdeflate = { workspace = true }
+crc32fast = { workspace = true }
 
 jpeg-encoder = { workspace = true }
 
@@ -135,6 +137,7 @@ getrandom = { workspace = true }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
+ryu-js = "1.0.3"
 
 tracing = { workspace = true }
 tracing-core = { workspace = true }
@@ -155,7 +158,6 @@ blitz = []
 pdf = ["blitz"]
 
 [dev-dependencies]
-crc32fast = "1"
 
 # [profile.*] lives in the workspace root Cargo.toml — cargo only
 # honors profiles there. Note: this crate's panic=unwind (so the DOM survives a panic) now

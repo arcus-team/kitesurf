@@ -12,6 +12,7 @@ import { localTraceParentProps } from "../tracing-local.ts";
 import { attributionTails, type AttributionTailExports } from "./attribution-tail.ts";
 import { getFontBytes, getImageBytes } from "./resource-store.ts";
 import { isIsolateGoneError } from "./limit-registry.ts";
+import { collectRetiredWorkers } from "./retired-worker-gc.ts";
 import type { Tracer } from "../tracing.ts";
 import type {
   PageRendererEntrypoint,
@@ -155,6 +156,13 @@ export interface RenderPdfResult {
   info?: string;
 }
 
+// An encoded-limit breach is deterministic: retrying the same frame cannot shrink it. Every other
+// raster failure may be a wedged renderer, which the caller retries against a fresh one.
+function isTerminalRenderFailure(result: RenderFrameResult): boolean {
+  if (result.ok || result.stage !== "raster") return true;
+  return result.error?.startsWith("encoded-limit:") === true;
+}
+
 export class PageRendererManager {
   private env: RendererEnv;
   private ctx: ExecutionContext;
@@ -277,7 +285,9 @@ export class PageRendererManager {
     // for the kill to abort it.
     if (!gone && stub && typeof stub.killIsolate === "function") {
       try {
-        Promise.resolve(stub.killIsolate(reason)).catch(() => {});
+        Promise.resolve(stub.killIsolate(reason))
+          .catch(() => {})
+          .finally(collectRetiredWorkers);
       } catch {}
     }
   }
@@ -304,7 +314,7 @@ export class PageRendererManager {
         for (let attempt = 0; attempt < MAX_RENDER_RASTER_ATTEMPTS; attempt++) {
           try {
             const result = await this.renderFrameOnce(source, opts);
-            if (result.ok || result.stage !== "raster") return result;
+            if (isTerminalRenderFailure(result)) return result;
             throw new Error(result.error ?? "renderFrame raster failure");
           } catch (error) {
             lastError = error instanceof Error ? error.message : String(error);
@@ -357,6 +367,7 @@ export class PageRendererManager {
           omitBackground: opts.omitBackground,
           ...(typeof opts.sinceSeq === "number" ? { sinceSeq: opts.sinceSeq } : {}),
           ...(opts.clip ? { clip: opts.clip } : {}),
+          ...(opts.encodedLimit !== undefined ? { encodedLimit: opts.encodedLimit } : {}),
           ...(typeof opts.partialKey === "string" && opts.partialKey
             ? { partialKey: opts.partialKey }
             : {}),

@@ -8824,8 +8824,8 @@
     "reason": null
   },
   "/css/cssom/CSSStyleSheet-constructable-concat.html": {
-    "expected": "FAIL",
-    "reason": "Shadow DOM not implemented. Test does host.attachShadow({mode:'open'}); shadow.adoptedStyleSheets = ... Our shim has no attachShadow on HTMLElement.prototype. 2 of 4 assertions (the document-level ones) succeed; the 2 shadow-level ones fail. Diff is mostly the PASS/FAIL text in <pre>. Same blocker as any other shadow-DOM test in the suite."
+    "expected": "PASS",
+    "reason": null
   },
   "/css/cssom/CSSStyleSheet-constructable-cssRules.html": {
     "expected": "PASS",
@@ -8848,7 +8848,7 @@
     "reason": null
   },
   "/css/cssom/CSSStyleSheet-constructable-invalidation.html": {
-    "expected": "FAIL",
+    "expected": "PASS",
     "reason": null
   },
   "/css/cssom/CSSStyleSheet-constructable-replace-cssRules.html": {
@@ -12615,7 +12615,7 @@
     "reason": "4/6 pass. The two 'should be stripped' subtests set an author RequestInit.referrer, which the page fetch shim doesn't thread to the gateway (buildForwardRequest synthesizes Referer from pageUrl only). They previously PASSed by accident: previously we sent origin-only Referer, which coincidentally equals the expected stripped value. The wave-2 full-URL same-origin Referer (browser-correct; fixed 'origin-when-cross-origin on a same-origin URL') exposed the gap. Fix = honor init.referrer (same-origin-with-client check + userinfo/fragment strip, per-hop interaction with the redirect loop) \u2014 separate slice."
   },
   "/fetch/api/basic/request-forbidden-headers.any.html": {
-    "expected": "FAIL",
+    "expected": "PASS",
     "reason": null,
     "timeout": 15000
   },
@@ -18410,7 +18410,7 @@
     "reason": null
   },
   "/html/semantics/embedded-content/the-iframe-element/sandbox_005.htm": {
-    "expected": "FAIL",
+    "expected": "PASS",
     "reason": null
   },
   "/html/semantics/embedded-content/the-iframe-element/sandbox_011.htm": {
@@ -18474,7 +18474,7 @@
     "reason": null
   },
   "/html/semantics/embedded-content/the-iframe-element/sandbox_029.htm": {
-    "expected": "FAIL",
+    "expected": "PASS",
     "reason": null
   },
   "/html/semantics/embedded-content/the-iframe-element/sandbox_030.htm": {
@@ -18482,7 +18482,7 @@
     "reason": null
   },
   "/html/semantics/embedded-content/the-iframe-element/sandbox_031.htm": {
-    "expected": "FAIL",
+    "expected": "PASS",
     "reason": null
   },
   "/html/semantics/embedded-content/the-iframe-element/sandbox_032.htm": {
@@ -18848,7 +18848,7 @@
     "reason": null
   },
   "/html/semantics/forms/the-input-element/range.html": {
-    "expected": "FAIL",
+    "expected": "PASS",
     "reason": null
   },
   "/html/semantics/forms/the-input-element/selection-weekmonth.html": {
@@ -19080,7 +19080,7 @@
     "reason": null
   },
   "/html/semantics/scripting-1/the-script-element/module/dynamic-import/microtasks/with-import-assertions.any.html": {
-    "expected": "FAIL",
+    "expected": "PASS",
     "reason": null
   },
   "/html/semantics/scripting-1/the-script-element/module/import-meta/import-meta-object.any.html": {
@@ -19976,7 +19976,7 @@
     "reason": null
   },
   "/selection/move-selection-range-into-different-root.tentative.html": {
-    "expected": "FAIL",
+    "expected": "PASS",
     "reason": null
   },
   "/selection/onselectionchange-on-distinct-text-controls.html": {
@@ -32585,8 +32585,8 @@
     "reason": null
   },
   "/dom/events/EventListener-incumbent-global-1.sub.html": {
-    "expected": "PASS",
-    "reason": null
+    "expected": "TIMEOUT",
+    "reason": "The www1 subframe sets document.domain and reads frames[0].document.body of its www2 child. Each cross-origin frame runs in its own PageScript isolate, so that synchronous DOM access gets null, the listener throws, and no result is posted. It times out at fb4dd599 too, so the earlier PASS did not come from the engine."
   },
   "/dom/events/keypress-dispatch-crash.html": {
     "expected": "PASS",
@@ -39024,5 +39024,109 @@
   "/html/semantics/document-metadata/the-meta-element/pragma-directives/attr-meta-http-equiv-refresh/parsing.html?131-last": {
     "expected": "PASS",
     "reason": "document.referrer on frame documents: measured PASS on two runs"
+  },
+  "/css/CSS2/normal-flow/block-in-inline-nested-001.xht": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/CSS2/normal-flow/block-in-inline-nested-002.xht": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/CSS2/normal-flow/block-in-inline-percents-001.xht": {
+    "expected": "PASS",
+    "reason": null
+  },
+  "/css/css-cascade/layer-stylesheet-multi-adoption.html": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/css-cascade/scope-shadow.html": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/css-display/display-contents-shadow-dom-1.html": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/css-masking/mask-svg-content/mask-empty-container-with-filter.svg": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/css-masking/mask-svg-content/mask-negative-scale.svg": {
+    "expected": "PASS",
+    "reason": null
+  },
+  "/css/css-masking/mask-svg-content/mask-on-thin-stroked-path-default.svg": {
+    "expected": "PASS",
+    "reason": null
+  },
+  "/css/css-masking/mask-svg-content/mask-text-001.svg": {
+    "expected": "PASS",
+    "reason": null
+  },
+  "/css/css-masking/mask-svg-content/mask-type-001.svg": {
+    "expected": "PASS",
+    "reason": null
+  },
+  "/css/css-masking/mask-svg-content/mask-type-002.svg": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/css-masking/mask-svg-content/mask-type-003.svg": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/css-masking/mask-svg-content/mask-with-filter-clipped-to-region.svg": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/css-masking/mask-svg-content/mask-with-filter.svg": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/css-masking/mask-svg-content/mask-with-rotation.svg": {
+    "expected": "PASS",
+    "reason": null
+  },
+  "/css/css-shadow/reslot-text-inheritance.html": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/css-shadow/shadow-host-style-sharing.html": {
+    "expected": "PASS",
+    "reason": null
+  },
+  "/css/css-shadow/shadow-host-with-before-after.html": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/cssom/StyleSheetList-constructable-shadow-with-style-recalc.html": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/cssom/StyleSheetList-constructable-shadow.html": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/cssom/StyleSheetList-constructable-with-style-recalc.html": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/cssom/StyleSheetList-constructable.html": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/cssom/adoptedstylesheets-cascade-order.html": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/css/cssom/adoptedstylesheets-observablearray.html": {
+    "expected": "FAIL",
+    "reason": null
+  },
+  "/html/rendering/bidi-rendering/slot-no-isolate-001.html": {
+    "expected": "FAIL",
+    "reason": null
   }
 }

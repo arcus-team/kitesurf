@@ -852,6 +852,11 @@ function maybeWrapInlineModule(body: string, url: string): string {
   return importStmts.join(";\n") + ";\n;(async () => {\n" + remainder + "\n})();\n";
 }
 
+// The stub body never names the url: a "*/" in its query would end the comment.
+const ASSET_IMPORT_STUB = "/* kitesurf: asset-import side-effect stub */\nexport {};\n";
+
+// Asset urls are fetched because dev servers (Vite `?import`, CSS) serve them as JS; a response
+// the module gate rejects, or one the walker cannot use, falls back to the stub.
 function isAssetExtension(url: string): boolean {
   let path = url;
   const q = path.indexOf("?");
@@ -1435,6 +1440,9 @@ export async function walkModuleGraph({
   };
 
   const fetchModuleBody = async (url: string): Promise<ModuleFetchResult> => {
+    // One attempt for an asset url: a failure only costs it the stub, so retrying would hold a
+    // fetch slot for up to three timeouts on a dead file.
+    if (isAssetExtension(url)) return attemptFetchModuleBody(url);
     let last: ModuleFetchResult = {
       ok: false,
       error: `module fetch not attempted for ${url}`,
@@ -1476,6 +1484,14 @@ export async function walkModuleGraph({
       crawlImports(url, fetched.body);
     }
     return true;
+  };
+
+  const recordFetchFailure = (url: string, error: string, preload?: true): void => {
+    if (isAssetExtension(url)) {
+      modules.set(url, ASSET_IMPORT_STUB);
+    } else if (!preload) {
+      failed.set(url, error);
+    }
   };
 
   const walkStartedAt = Date.now();
@@ -1527,11 +1543,6 @@ export async function walkModuleGraph({
         deadlineSkipped++;
         continue;
       }
-      if (isAssetExtension(url)) {
-        // Not the url: a "*/" in its query would end the comment.
-        modules.set(url, "/* kitesurf: asset-import side-effect stub */\nexport {};\n");
-        continue;
-      }
       keep.push(item);
       const cls = itemClass(item);
       if (best === null || cls < bestClass || (cls === bestClass && item.depth < best.depth)) {
@@ -1575,7 +1586,7 @@ export async function walkModuleGraph({
       }
       totalFetches++;
       if (!result.ok) {
-        if (!item.preload) failed.set(item.url, result.error);
+        recordFetchFailure(item.url, result.error, item.preload);
       } else if (item.sizeCapped && result.body.length > MAX_DYNAMIC_MODULE_BYTES) {
         oversizedDynamicSkipped++;
         sizeSkipped.add(item.url);
@@ -1660,7 +1671,7 @@ export async function walkModuleGraph({
           );
           for (const { item, r } of drained) {
             if (!r.ok) {
-              failed.set(item.url, r.error);
+              recordFetchFailure(item.url, r.error);
               continue;
             }
             if (!storeFetched(item.url, r)) continue;
@@ -1778,6 +1789,16 @@ export async function walkModuleGraph({
         prunedCount++;
       }
     }
+  }
+
+  // An asset url whose body the walker could not use (unlexable or unresolvable JS, unparsable
+  // JSON) keeps the side-effect stub, as a rejected fetch does. Its cached lex of the failed body
+  // would otherwise be spliced into the stub by the rewrite pass.
+  for (const url of [...failed.keys()]) {
+    if (!isAssetExtension(url) || modules.has(url)) continue;
+    failed.delete(url);
+    lexCache.delete(url);
+    modules.set(url, ASSET_IMPORT_STUB);
   }
 
   // A missing static dependency makes every importing module fail, even if a registry alias

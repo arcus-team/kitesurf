@@ -55,8 +55,6 @@ export interface PageScriptState {
   document: ShimDocument | null;
   window: ShimWindow | null;
 
-  lastForceRestyleSeq: number;
-
   lastRecordScrollX: number;
   lastRecordScrollY: number;
   lastRecordViewportW: number;
@@ -74,7 +72,6 @@ export interface PageScriptState {
   scrollX: number;
   scrollY: number;
 
-  getOpLog: () => unknown[];
   setReadyState: (s: string) => void;
   drainCookieWrites: () => string[];
   setCookieString: (s: string) => void;
@@ -108,6 +105,12 @@ export const ksGlobal = globalThis as ShimGlobal;
 // The same object for computed keys (constructor-install loops). No type can list those keys,
 // so reads are `unknown` and need narrowing.
 export const ksGlobalByKey: Record<PropertyKey, unknown> = globalThis;
+
+// A local workerd with V8's --expose-gc gives every isolate gc() for the engine's sake
+// (engine/src/eval/retired-worker-gc.ts). workerd makes it non-configurable, so pages and their
+// workers get it as undefined instead.
+if (Object.getOwnPropertyDescriptor(globalThis, "gc")?.writable)
+  Reflect.set(globalThis, "gc", undefined);
 
 // Every buildDocument constructor named Event or *Event.
 type ShimEventCtorName = Extract<keyof BuildDocumentResult, "Event" | `${string}Event`>;
@@ -145,7 +148,6 @@ export const state: PageScriptState = {
   cookieKey: "",
   document: null,
   window: null,
-  lastForceRestyleSeq: -1,
   lastRecordScrollX: 0,
   lastRecordScrollY: 0,
   lastRecordViewportW: 0,
@@ -162,7 +164,6 @@ export const state: PageScriptState = {
   scrollX: 0,
   scrollY: 0,
 
-  getOpLog: () => [],
   setReadyState: () => {},
   drainCookieWrites: () => [],
   setCookieString: () => {},
